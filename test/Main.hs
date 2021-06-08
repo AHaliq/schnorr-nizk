@@ -9,13 +9,14 @@ import           Test.Tasty.HUnit
 import TestSchnorr
 import TestGroupLaws
 import TestCurveOps
+import TestOVN
 
 main :: IO ()
 main = defaultMain tests
 
 tests :: TestTree
 tests = testGroup "Tests"
-  [ testGroupLaws
-  , testCurveOps
-  , testSchnorr
+  [ testOVN--testGroupLaws
+  --, testCurveOps
+  --, testSchnorr
   ]
