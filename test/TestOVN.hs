@@ -65,10 +65,10 @@ sumVs (vs, _, _, _, _) = sum vs
 -- tally ----------------------------------------------------------------------
 
 proveKey :: MonadRandom m => Compute -> m Bool
-proveKey c = mapM aux (listify c) <&> and
+proveKey c = and <$> mapM aux (listify c)
   where
     aux :: MonadRandom m => Computed -> m Bool
-    aux (v, p, s, r, vv) = prove curveName g (p, s) <&> verify curveName g p
+    aux (v, p, s, r, vv) = verify curveName g p <$> prove curveName g (p, s)
     g = pointBaseMul curveName 1
 
 -- proof private key ----------------------------------------------------------
