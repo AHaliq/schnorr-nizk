@@ -1,12 +1,18 @@
-
+{-# LANGUAGE TemplateHaskell #-}
 module TestOVN where
 
+import Debug.Trace
 import System.Random
+import Control.Lens
+import Control.Arrow
+import Data.ByteString.Conversion
+import Data.ByteString (unpack)
+import Data.Maybe
 import           Protolude
 import           Test.Tasty
 import           Test.Tasty.QuickCheck
 import           Test.Tasty.HUnit
-
+import           Crypto.Hash.SHA256
 import           Crypto.Random.Types (MonadRandom)
 import qualified Crypto.PubKey.ECC.Prim as ECC
 import qualified Crypto.PubKey.ECC.Types as ECC
@@ -15,9 +21,13 @@ import qualified Crypto.PubKey.ECC.ECDSA    as ECDSA
 import           Schnorr
 import           Schnorr.Internal
 import           Schnorr.Curve as Curve
+import           Schnorr.Curve25519 (curve25519)
 
 curveName :: Curve25519
 curveName = Curve.Curve25519
+
+q :: Integer
+q = case curve25519 of (ECC.CurveFP (ECC.CurvePrime _ ECC.CurveCommon{..})) -> ecc_n
 
 type Point = ECC.Point
 
@@ -26,6 +36,15 @@ type Point = ECC.Point
 
 (*|) :: Integer -> Point -> Point
 (*|) = pointMul curveName
+
+(+%) :: Integer -> Integer -> Integer
+(+%) a b = (a + b) `mod` q
+
+(-%) :: Integer -> Integer -> Integer
+(-%) a b = let aN = if a > b then a else a + q in (aN - b) `mod` q
+
+(*%) :: Integer -> Integer -> Integer
+(*%) a b = (a * b) `mod` q
 
 bmul :: Integer -> Point
 bmul = pointBaseMul curveName
@@ -44,24 +63,167 @@ partition xs i = case splitAt (i-1) xs of (as, bs) -> (as, drop 1 bs)
 
 -- utils ----------------------------------------------------------------------
 
-type Compute = ([Integer], [ECDSA.PublicPoint], [ECDSA.PrivateNumber], [ECC.Point], [ECC.Point])
-type Computed = (Integer, ECDSA.PublicPoint, ECDSA.PrivateNumber, ECC.Point, ECC.Point)
-type ComputeList = [Computed]
+data CDSProofVars
+  = CDSProofVars
+    { a1 :: Point
+    , b1 :: Point
+    , a2 :: Point
+    , b2 :: Point
+    } deriving (Show, Eq)
 
-compute :: [Integer] -> IO Compute
-compute vs = do
-  keys <- mapM (const $ generateKeys curveName) vs
-  let pk = map(ECDSA.public_q . fst) keys
-      sk = map (ECDSA.private_d . snd) keys
-      rk = map ((\(a,b) -> sump a +| (negp . sump $ b)) . partition pk) [1..length vs]
-      vk = map bmul vs
-    in pure (vs, pk, sk, rk, vk)
+data CDSProofParam
+  = CDSProofParam
+    { d1 :: Integer
+    , d2 :: Integer
+    , r1 :: Integer
+    , r2 :: Integer
+    } deriving (Show, Eq)
+data CDSProof
+  = CDSProof
+    { vars :: CDSProofVars
+    , params :: CDSProofParam
+    } deriving (Show, Eq)
+data Voter''
+  = Voter''
+    { _i :: Int
+    , _x :: Integer
+    , _xG :: Point
+    , _b :: Bool
+    } deriving (Show, Eq)
+makeLenses ''Voter''
+data Voter'
+  = Voter'
+    { _v'' :: Voter''
+    , _yG :: Point
+    , _y' :: Point
+    } deriving (Show, Eq)
+makeLenses ''Voter'
 
-listify :: Compute -> ComputeList
-listify ([],[],[],[],[]) = []
-listify (v:vs, p:pk, s:sk, r:rk, vv:vk) = (v,p,s,r,vv) : listify (vs,pk,sk,rk,vk)
+data Voter
+  = Voter
+    { _v' :: Voter'
+    , _xProof :: NIZKProof
+    , _yProof :: CDSProof
+    } deriving (Show, Eq)
+makeLenses ''Voter
+
+-- voter data -----------------------------------------------------------------
+
+bstoi :: ByteString -> Integer
+bstoi = fromDigits 0 . unpack
+  where
+    fromDigits n [] = n
+    fromDigits n (x:xs) = fromDigits (n + 256 + toInteger x) xs
+
+getHash :: Voter' -> CDSProofVars -> Integer
+getHash Voter'{_v''=Voter''{..},..} CDSProofVars{..} =
+  bstoi $ finalize $ u (toByteString' _x) $ foldl up init [_xG, _y', a1, b1, a2, b2]
+  where
+    u = flip update
+    up c (ECC.Point a b) = u (toByteString' a) $ u (toByteString' b) c
+
+getHashProof :: Voter' -> CDSProof -> Integer
+getHashProof v CDSProof{..} = getHash v vars
+
+proveCDS :: MonadRandom m => Bool -> Voter' -> m CDSProof
+proveCDS yes v'@Voter'{_v''=Voter''{..},..} = do
+  (wG, w) <- (ECDSA.public_q *** ECDSA.private_d) <$> generateKeys curveName
+  (dG, d) <- (ECDSA.public_q *** ECDSA.private_d) <$> generateKeys curveName
+  (rG, r) <- (ECDSA.public_q *** ECDSA.private_d) <$> generateKeys curveName
+  let
+    vars = CDSProofVars
+      { a1 = if yes then rG +| (_x *| dG) else wG
+      , b1 = if yes then (r *| _yG) +| (d *| ((_x *| _yG) +| g curveName)) else w *| _yG
+      , a2 = if yes then wG else rG +| (_x *| dG)
+      , b2 = if yes then w *| _yG else (d *| (_x *| _yG)) +| (r *| _yG) +| (d *| negp (g curveName))
+      }
+    c = getHash v' vars
+    d' = c -% d
+    r' = w -% (_x *% d')
+    in
+    pure $ CDSProof
+      { vars = vars
+      , params = CDSProofParam
+        { d1 = if yes then d else d'
+        , d2 = if yes then d' else d
+        , r1 = if yes then r else r'
+        , r2 = if yes then r' else r
+        }
+      }
+
+verifyPoint :: Point -> Bool
+verifyPoint = isPointValid curveName
+
+verifyVoter :: Voter' -> Bool
+verifyVoter Voter'{_v''=Voter''{..},..} = all verifyPoint [_xG, _yG, _y']
+
+verifyYProof :: CDSProof -> Bool
+verifyYProof CDSProof{vars=CDSProofVars{..},..} = all verifyPoint [a1, b1, a2, b2]
+
+verifyCDS :: Voter -> Bool
+verifyCDS Voter
+  { _v'=_v'@Voter'{_v''=Voter''{..},..}
+  , _yProof=yP@CDSProof
+    { vars=CDSProofVars{..}
+    , params=CDSProofParam{..}
+    }
+  , ..} =
+  and [verifyKeys, verifyC, verifyA1, verifyB1, verifyA2, verifyB2]
+  where
+    verifyKeys = verifyVoter _v' && verifyYProof yP
+    verifyC = getHashProof _v' yP == d1 +% d2
+    verifyA1 = a1 == (d1 *| _xG) +| (r1 *| g curveName)
+    verifyB1 = b1 == (r1 *| _yG) +| (d1 *| _y')
+    verifyA2 = a2 == (r2 *| g curveName) +| (d2 *| _xG)
+    verifyB2 = b2 == (r2 *| _yG) +| (d2 *| (negp (g curveName) +| _y'))
+
+-- something wrong with modulus
+-- CDS proving ----------------------------------------------------------------
+
+compute'' :: Int -> Bool -> IO Voter''
+compute'' i b = do
+  (xG, x) <- (ECDSA.public_q *** ECDSA.private_d) <$> generateKeys curveName
+  pure Voter''
+    { _i = i
+    , _x = x
+    , _xG = xG
+    , _b = b
+    }
+
+compute' :: [Voter''] -> [Voter']
+compute' vs = zipWith aux vs $ map (partition (map (^. xG) vs) . (^. i)) vs
+  where
+    aux v''@Voter''{..} (lhs,rhs) =
+      let
+        yG = sump lhs +| (negp . sump $ rhs)
+      in
+      Voter'
+        { _v'' = v''
+        , _yG = yG
+        , _y' = let y' = _x *| yG in if _b then y' +| g curveName else y'
+        }
+
+compute :: MonadRandom m => Voter' -> m Voter
+compute v'@Voter'{_v''=Voter''{..},..} = do
+  xP <- prove curveName (g curveName) (_xG, _x)
+  yP <- proveCDS _b v'
+  pure $ Voter
+    { _v' = v'
+    , _xProof = xP
+    , _yProof = yP
+    }
+
+fullCompute :: [Bool] -> IO [Voter]
+fullCompute bs = zipWithM compute'' [1..length bs] bs <&> compute' >>= mapM compute
+
+{-
+computeList :: [Bool] -> IO [Voter'']
+computeList vs = error
+  where
+    v'' = zipWithM compute'' (map toInteger [1.. length vs]) vs-}
+
 -- compute keys ---------------------------------------------------------------
-
+{-
 search :: ECC.Point -> Integer
 search p = aux 0 ECC.PointO p
   where
@@ -74,26 +236,21 @@ sumVs :: Compute -> Integer
 sumVs (vs, _, _, _, _) = sum vs
 
 -- tally ----------------------------------------------------------------------
-
-proveKey :: MonadRandom m => Compute -> m Bool
-proveKey c = and <$> mapM aux (listify c)
-  where
-    aux :: MonadRandom m => Computed -> m Bool
-    aux (v, p, s, r, vv) = verify curveName g p <$> prove curveName g (p, s)
-    g = pointBaseMul curveName 1
-
--- proof private key ----------------------------------------------------------
-
-testOVNSet :: TestName -> IO Compute -> TestTree
+-}
+testOVNSet :: TestName -> IO [Voter] -> TestTree
 testOVNSet tn c = testGroup tn
-  [ testCase "tally" $ c >>= (\x -> tally x @?= sumVs x)
-  , testCase "prove key" $ c >>= proveKey >>= (@?= True)]
+  [ testCase "CDSProof" $ c >>= (\(v:vs) -> verifyCDS v @?= True)]
+  --[ testCase "tally" $ c >>= (\x -> tally x @?= sumVs x)
+  --, testCase "prove key" $ c >>= proveKey >>= (@?= True)]
 
 testOVN :: TestTree
 testOVN = testGroup "OVN test"
-  [ withResource (compute [1,0,0,1,1]) d $ testOVNSet "[1,0,0,1,1] votes"]
+  [ withResource (fullCompute [True,False]) d $ testOVNSet "[1,0,0,1,1] votes"]
   --, withResource (randomVotes 5 >>= compute) d $ testOVNSet "random 5 votes"
   --, withResource (randomVotes 100 >>= compute) d $ testOVNSet "random 100 votes"]
   where
     d :: a -> IO ()
     d = const $ pure ()
+-- TODO
+-- test hash check passes
+-- verifyCDS, tally, sum from Voters, testOVNSet
