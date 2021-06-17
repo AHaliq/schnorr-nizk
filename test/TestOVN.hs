@@ -7,6 +7,7 @@ import Control.Lens
 import Control.Arrow
 import Data.ByteString.Conversion
 import Data.ByteString (unpack)
+import Data.ByteString.FastBuilder
 import Data.Maybe
 import           Protolude
 import           Test.Tasty
@@ -117,19 +118,20 @@ bstoi = fromDigits 0 . unpack
 
 getHash :: Voter' -> CDSProofVars -> Integer
 getHash Voter'{_v''=Voter''{..},..} CDSProofVars{..} =
-  bstoi $ finalize $ u (toByteString' _x) $ foldl up init [_xG, _y', a1, b1, a2, b2]
+  bstoi $ toStrictByteString $ integerDec _x <> foldl up mempty [_xG, _y', a1, b1, a2, b2]
   where
-    u = flip update
-    up c (ECC.Point a b) = u (toByteString' a) $ u (toByteString' b) c
+    up c (ECC.Point a b) = c <> integerDec a <> integerDec b
 
 getHashProof :: Voter' -> CDSProof -> Integer
 getHashProof v CDSProof{..} = getHash v vars
 
 proveCDS :: MonadRandom m => Bool -> Voter' -> m CDSProof
-proveCDS yes v'@Voter'{_v''=Voter''{..},..} = do
-  (wG, w) <- (ECDSA.public_q *** ECDSA.private_d) <$> generateKeys curveName
-  (dG, d) <- (ECDSA.public_q *** ECDSA.private_d) <$> generateKeys curveName
-  (rG, r) <- (ECDSA.public_q *** ECDSA.private_d) <$> generateKeys curveName
+proveCDS yes v'@Voter'{_v''=Voter''{..},..} =
+  let extract = (ECDSA.public_q *** ECDSA.private_d) in
+  do
+  (wG, w) <- extract <$> generateKeys curveName
+  (dG, d) <- extract <$> generateKeys curveName
+  (rG, r) <- extract <$> generateKeys curveName
   let
     vars = CDSProofVars
       { a1 = if yes then rG +| (_x *| dG) else wG
@@ -177,7 +179,9 @@ verifyCDS Voter
     verifyA2 = a2 == (r2 *| g curveName) +| (d2 *| _xG)
     verifyB2 = b2 == (r2 *| _yG) +| (d2 *| (negp (g curveName) +| _y'))
 
--- something wrong with modulus
+verifyNIZK :: Voter -> Bool
+verifyNIZK Voter{_v'=Voter'{_v''=Voter''{..}},..} = verify curveName (g curveName) _xG _xProof
+
 -- CDS proving ----------------------------------------------------------------
 
 compute'' :: Int -> Bool -> IO Voter''
@@ -213,44 +217,38 @@ compute v'@Voter'{_v''=Voter''{..},..} = do
     , _yProof = yP
     }
 
-fullCompute :: [Bool] -> IO [Voter]
-fullCompute bs = zipWithM compute'' [1..length bs] bs <&> compute' >>= mapM compute
-
-{-
-computeList :: [Bool] -> IO [Voter'']
-computeList vs = error
-  where
-    v'' = zipWithM compute'' (map toInteger [1.. length vs]) vs-}
+computeList :: [Bool] -> IO [Voter]
+computeList bs = zipWithM compute'' [1..length bs] bs <&> compute' >>= mapM compute
 
 -- compute keys ---------------------------------------------------------------
-{-
-search :: ECC.Point -> Integer
+
+search :: Point -> Integer
 search p = aux 0 ECC.PointO p
   where
     aux i c p = if c == p then i else aux (i+1) (c +| g curveName) p
 
-tally :: Compute -> Integer
-tally (vs, _, sk, rk, vk) = search (sump $ zipWith (\v (s,r) -> (s *| r) +| v) vk (zip sk rk))
+tally :: [Voter] -> Integer
+tally vs = search $ aux vs
+  where
+    aux [] = ECC.PointO
+    aux (Voter{_v'=Voter'{..}}:vs) =_y' +| aux vs
 
-sumVs :: Compute -> Integer
-sumVs (vs, _, _, _, _) = sum vs
+sumVs :: [Voter] -> Integer
+sumVs vs = sum $ map ((\x -> if x then 1 else 0) . (^. b) . (^. v'') . (^. v')) vs
 
 -- tally ----------------------------------------------------------------------
--}
+
 testOVNSet :: TestName -> IO [Voter] -> TestTree
 testOVNSet tn c = testGroup tn
-  [ testCase "CDSProof" $ c >>= (\(v:vs) -> verifyCDS v @?= True)]
-  --[ testCase "tally" $ c >>= (\x -> tally x @?= sumVs x)
-  --, testCase "prove key" $ c >>= proveKey >>= (@?= True)]
+  [ testCase "tally" $ c >>= (\x -> tally x @?= sumVs x)
+  , testCase "CDSProof" $ c <&> all verifyCDS >>= (@?= True)
+  , testCase "NIZKProof" $ c <&> all verifyNIZK >>= (@?= True)]
 
 testOVN :: TestTree
 testOVN = testGroup "OVN test"
-  [ withResource (fullCompute [True,False]) d $ testOVNSet "[1,0,0,1,1] votes"]
-  --, withResource (randomVotes 5 >>= compute) d $ testOVNSet "random 5 votes"
-  --, withResource (randomVotes 100 >>= compute) d $ testOVNSet "random 100 votes"]
+  [ withResource (computeList [True,False, False, True, True]) d $ testOVNSet "[1,0,0,1,1] votes"
+  , withResource (randomVotes 5 >>= computeList) d $ testOVNSet "random 5 votes"
+  , withResource (randomVotes 100 >>= computeList) d $ testOVNSet "random 100 votes"]
   where
     d :: a -> IO ()
     d = const $ pure ()
--- TODO
--- test hash check passes
--- verifyCDS, tally, sum from Voters, testOVNSet
