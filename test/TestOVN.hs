@@ -1,22 +1,21 @@
 {-# LANGUAGE TemplateHaskell #-}
 module TestOVN where
 
-import Debug.Trace
-import System.Random
-import Control.Lens
-import Control.Arrow
-import Data.ByteString.Conversion
-import Data.ByteString (unpack)
-import Data.ByteString.FastBuilder
-import Data.Maybe
+import           System.Random
+import           Control.Lens
+import           Control.Arrow
+import           Data.ByteString.Conversion
+import           Data.ByteString (unpack)
+import           Data.ByteString.FastBuilder
+import           Data.Maybe
 import           Protolude
 import           Test.Tasty
 import           Test.Tasty.QuickCheck
 import           Test.Tasty.HUnit
 import           Crypto.Hash.SHA256
 import           Crypto.Random.Types (MonadRandom)
-import qualified Crypto.PubKey.ECC.Prim as ECC
-import qualified Crypto.PubKey.ECC.Types as ECC
+import qualified Crypto.PubKey.ECC.Prim     as ECC
+import qualified Crypto.PubKey.ECC.Types    as ECC
 import qualified Crypto.PubKey.ECC.Generate as ECC
 import qualified Crypto.PubKey.ECC.ECDSA    as ECDSA
 import           Schnorr
@@ -32,11 +31,7 @@ q = case curve25519 of (ECC.CurveFP (ECC.CurvePrime _ ECC.CurveCommon{..})) -> e
 
 type Point = ECC.Point
 
-(+|) :: Point -> Point -> Point
-(+|) = pointAdd curveName
-
-(*|) :: Integer -> Point -> Point
-(*|) = pointMul curveName
+-- aliases --------------------------------------------------------------------
 
 (+%) :: Integer -> Integer -> Integer
 (+%) a b = (a + b) `mod` q
@@ -47,6 +42,14 @@ type Point = ECC.Point
 (*%) :: Integer -> Integer -> Integer
 (*%) a b = (a * b) `mod` q
 
+-- modular arithmetic ops -----------------------------------------------------
+
+(+|) :: Point -> Point -> Point
+(+|) = pointAdd curveName
+
+(*|) :: Integer -> Point -> Point
+(*|) = pointMul curveName
+
 bmul :: Integer -> Point
 bmul = pointBaseMul curveName
 
@@ -55,6 +58,8 @@ negp = pointNegate curveName
 
 sump :: [ECC.Point] -> ECC.Point
 sump = foldl (+|) ECC.PointO
+
+-- group ops ------------------------------------------------------------------
 
 randomVotes :: Int -> IO [Bool]
 randomVotes n = replicateM n randomIO
@@ -182,7 +187,7 @@ verifyCDS Voter
 verifyNIZK :: Voter -> Bool
 verifyNIZK Voter{_v'=Voter'{_v''=Voter''{..}},..} = verify curveName (g curveName) _xG _xProof
 
--- CDS proving ----------------------------------------------------------------
+-- prove verify ---------------------------------------------------------------
 
 compute'' :: Int -> Bool -> IO Voter''
 compute'' i b = do
