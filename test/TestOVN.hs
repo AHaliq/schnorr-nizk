@@ -6,8 +6,6 @@ import           Control.Lens
 import           Control.Arrow
 import           Data.ByteString.Conversion
 import           Data.ByteString (unpack)
-import           Data.ByteString.FastBuilder
-import           Data.Maybe
 import           Protolude
 import           Test.Tasty
 import           Test.Tasty.QuickCheck
@@ -123,9 +121,7 @@ bstoi = fromDigits 0 . unpack
 
 getHash :: Voter' -> CDSProofVars -> Integer
 getHash Voter'{_v''=Voter''{..},..} CDSProofVars{..} =
-  bstoi $ toStrictByteString $ integerDec _x <> foldl up mempty [_xG, _y', a1, b1, a2, b2]
-  where
-    up c (ECC.Point a b) = c <> integerDec a <> integerDec b
+  bstoi $ sha256 $ toByteString' _x <> foldl (<>) mempty (map appendCoordinates [_xG, _y', a1, b1, a2, b2])
 
 getHashProof :: Voter' -> CDSProof -> Integer
 getHashProof v CDSProof{..} = getHash v vars
