@@ -113,26 +113,19 @@ makeLenses ''Voter
 
 -- voter data -----------------------------------------------------------------
 
-bstoi :: ByteString -> Integer
-bstoi = fromDigits 0 . unpack
-  where
-    fromDigits n [] = n
-    fromDigits n (x:xs) = fromDigits (n + 256 + toInteger x) xs
-
 getHash :: Voter' -> CDSProofVars -> Integer
 getHash Voter'{_v''=Voter''{..},..} CDSProofVars{..} =
-  bstoi $ sha256 $ toByteString' _x <> foldl (<>) mempty (map appendCoordinates [_xG, _y', a1, b1, a2, b2])
+  oracle curveName $ toByteString' _x <> foldl (<>) mempty (map appendCoordinates [_xG, _y', a1, b1, a2, b2])
 
 getHashProof :: Voter' -> CDSProof -> Integer
 getHashProof v CDSProof{..} = getHash v vars
 
 proveCDS :: MonadRandom m => Bool -> Voter' -> m CDSProof
 proveCDS yes v'@Voter'{_v''=Voter''{..},..} =
-  let extract = (ECDSA.public_q *** ECDSA.private_d) in
   do
-  (wG, w) <- extract <$> generateKeys curveName
-  (dG, d) <- extract <$> generateKeys curveName
-  (rG, r) <- extract <$> generateKeys curveName
+  (wG, w) <- genCommitment curveName (g curveName)
+  (dG, d) <- genCommitment curveName (g curveName)
+  (rG, r) <- genCommitment curveName (g curveName)
   let
     vars = CDSProofVars
       { a1 = if yes then rG +| (_x *| dG) else wG
