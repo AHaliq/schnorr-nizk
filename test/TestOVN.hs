@@ -21,11 +21,11 @@ import           Schnorr.Internal
 import           Schnorr.Curve as Curve
 import           Schnorr.Curve25519 (curve25519)
 
-curveName :: Curve25519
-curveName = Curve.Curve25519
+curveName :: CurveAltBn128G1
+curveName = Curve.CurveAltBn128G1
 
 q :: Integer
-q = case curve25519 of (ECC.CurveFP (ECC.CurvePrime _ ECC.CurveCommon{..})) -> ecc_n
+q = case Curve.curveAltBn128G1 of (ECC.CurveFP (ECC.CurvePrime _ ECC.CurveCommon {..})) -> ecc_n
 
 type Point = ECC.Point
 
